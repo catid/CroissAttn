@@ -39,6 +39,12 @@ out.float().square().mean().backward()
 weights.  Replace the `torch.matmul` calls in `nvfp4.py` with the device's
 native NVFP4 GEMM to build a complete high-throughput trainer.
 
+Run the checks with `pip install -e .` followed by `pytest -q`.  On the GB300
+reference container, the CUDA smoke test covers `B=1,H=2,S=16,D=16` and
+chunk sizes 4, 8, and full sequence; every output and gradient is finite. The
+portable path is intentionally slower than TE's native NVFP4 MLP kernels until
+the `fp4_matmul` hook is replaced by a block-scaled Blackwell GEMM.
+
 The repository was initialized from an empty `catid/CroissAttn` remote.  The
 SSH remote is not authenticated in this environment, so the local commit is
 ready to push once GitHub credentials are available.
