@@ -84,13 +84,13 @@ class _NVFP4LinearFunction(Function):
 
 
 class NVFP4Linear(nn.Linear):
-    """Linear layer with NVFP4 forward operands and an STE backward.
+    """Linear layer with NVFP4 forward and backward operands.
 
     The attention module in :mod:`croissattn.attention` implements the full
-    stochastic CroissAttn backward.  For projections, this layer uses native
-    ``torch.matmul`` on decoded NVFP4 operands and an identity straight-through
-    estimator for the quantizer.  A Blackwell extension can replace the two
-    decoded matmuls with ``nvte_cublas_gemm`` while retaining this API.
+    stochastic CroissAttn backward.  For projections, this layer saves forward
+    NVFP4 payloads and uses independently stochastic, consumer-axis recast FP4
+    dgrad and wgrad products. A Blackwell extension can replace the decoded
+    matmuls with ``nvte_cublas_gemm`` while retaining this API.
     """
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
