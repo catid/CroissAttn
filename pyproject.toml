@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "croissattn"
+version = "0.1.0"
+description = "Complete NVFP4 attention forward and CroissAttn backward"
+requires-python = ">=3.10"
+dependencies = ["torch>=2.5"]
+
+[tool.setuptools.packages.find]
+include = ["croissattn*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
