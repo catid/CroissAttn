@@ -9,6 +9,7 @@ def test_roundtrip_and_axis_recast():
     y = q.decode()
     assert y.shape == x.shape
     assert torch.isfinite(y).all()
+    assert q.packed_payload().shape[-1] == q.padded // 2
     q2 = q.recast(-2)
     assert q2.decode().shape == x.shape
 

@@ -135,6 +135,19 @@ class NVFP4Tensor:
 
         return quantize_nvfp4(self.decode(), axis=axis, stochastic=stochastic)
 
+    def packed_payload(self) -> torch.Tensor:
+        """Pack two E2M1 codes per byte for a native NVFP4 kernel.
+
+        The returned tensor keeps the quantizer's moved layout (the block axis
+        is last), which is the layout expected by Blackwell FP4 GEMM adapters.
+        ``block_scale`` and ``global_scale`` remain separate metadata.
+        """
+
+        if self.padded % 2:
+            raise ValueError("NVFP4 payload width must be even to pack nibbles")
+        codes = self.payload.contiguous()
+        return codes[..., 0::2] | (codes[..., 1::2] << 4)
+
 
 def quantize_nvfp4(
     x: torch.Tensor,
