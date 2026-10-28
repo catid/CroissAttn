@@ -39,17 +39,41 @@ def _score_replay(qf: torch.Tensor, kf: torch.Tensor, scale: float) -> torch.Ten
     return torch.matmul(qf, kf.transpose(-2, -1)) * scale
 
 
+def _replay_probability_tile(
+    qf: torch.Tensor,
+    kf: torch.Tensor,
+    row_max: torch.Tensor,
+    l: torch.Tensor,
+    *,
+    scale: float,
+    q0: int,
+    q1: int,
+    k0: int,
+    k1: int,
+) -> torch.Tensor:
+    """Replay one exact causal probability tile from saved Q/K payloads."""
+
+    scores = torch.matmul(
+        qf[..., q0:q1, :], kf[..., k0:k1, :].transpose(-2, -1)
+    ).float() * scale
+    rows = torch.arange(q0, q1, device=scores.device)[:, None]
+    cols = torch.arange(k0, k1, device=scores.device)[None, :]
+    scores = scores.masked_fill(cols > rows, float("-inf"))
+    return torch.exp(scores - row_max[..., q0:q1, :]) / l[..., q0:q1, :]
+
+
 def backward_components(
     qf,
     kf,
     vf,
     uf,
-    p: torch.Tensor,
+    p: Optional[torch.Tensor],
     l: torch.Tensor,
     do: torch.Tensor,
     *,
     scale: float,
     chunk_size: Optional[int] = None,
+    row_max: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Evaluate the complete stochastic CroissAttn backward.
 
@@ -62,18 +86,43 @@ def backward_components(
     k_dec = kf.decode()
     v_dec = vf.decode()
     u_dec = uf.decode()
-    # The auxiliary uses the unquantized softmax probabilities and the saved
-    # forward V payload.  It is computed before any stochastic backward draw.
-    o_prime = torch.matmul(p, v_dec)
-    dstar = (do.float() * o_prime.float()).sum(dim=-1, keepdim=True)
-
-    sq, sk = p.shape[-2:]
+    sq, sk = q_dec.shape[-2], k_dec.shape[-2]
+    if p is None and row_max is None:
+        raise ValueError("row_max is required when probability replay is enabled")
     tile = max(int(chunk_size), 1) if chunk_size else max(sq, sk)
     dn = do / l.to(dtype=do.dtype)
 
     dq = torch.zeros_like(q_dec)
     dk = torch.zeros_like(k_dec)
     dv = torch.zeros_like(v_dec)
+
+    # Replay O' in tiles as well.  This keeps the high precision probability
+    # matrix out of the saved autograd state; only packed U and row statistics
+    # cross the forward/backward boundary.
+    dstar = torch.zeros(
+        (*do.shape[:-2], sq, 1), dtype=torch.float32, device=do.device
+    )
+    for q0 in range(0, sq, tile):
+        q1 = min(q0 + tile, sq)
+        o_prime_i = torch.zeros(
+            (*do.shape[:-2], q1 - q0, v_dec.shape[-1]),
+            dtype=torch.float32,
+            device=do.device,
+        )
+        for k0 in range(0, sk, tile):
+            k1 = min(k0 + tile, sk)
+            p_ij = (
+                p[..., q0:q1, k0:k1]
+                if p is not None
+                else _replay_probability_tile(
+                    q_dec, k_dec, row_max, l, scale=scale,
+                    q0=q0, q1=q1, k0=k0, k1=k1,
+                )
+            )
+            o_prime_i += torch.matmul(p_ij.float(), v_dec[..., k0:k1, :].float())
+        dstar[..., q0:q1, :] = (do[..., q0:q1, :].float() * o_prime_i).sum(
+            dim=-1, keepdim=True
+        )
 
     # One tiled QRO traversal computes a single dP/dS tile and feeds both
     # dependent score products.  This preserves the paper's dependency order:
@@ -86,7 +135,14 @@ def backward_components(
         dn_i = dn[..., q0:q1, :]
         for k0 in range(0, sk, tile):
             k1 = min(k0 + tile, sk)
-            p_ij = p[..., q0:q1, k0:k1]
+            p_ij = (
+                p[..., q0:q1, k0:k1]
+                if p is not None
+                else _replay_probability_tile(
+                    q_dec, k_dec, row_max, l, scale=scale,
+                    q0=q0, q1=q1, k0=k0, k1=k1,
+                )
+            )
             v_j = v_dec[..., k0:k1, :]
             dp_ij = fp4_matmul(
                 do_i,
@@ -170,7 +226,9 @@ class _NVFP4AttentionFunction(Function):
         output = (torch.matmul(u_dec, v_dec) / l).to(dtype=q.dtype)
 
         ctx.qf, ctx.kf, ctx.vf, ctx.uf = qf, kf, vf, uf
-        ctx.p, ctx.l = p, l
+        # Save row statistics instead of the dense probability matrix.  The
+        # backward replays exact Q/K payloads and causal tiles on demand.
+        ctx.p, ctx.l, ctx.row_max = None, l, row_max
         ctx.attn_scale = attn_scale
         ctx.chunk_size = chunk_size
         ctx.input_dtype = q.dtype
@@ -188,6 +246,7 @@ class _NVFP4AttentionFunction(Function):
             do,
             scale=ctx.attn_scale,
             chunk_size=ctx.chunk_size,
+            row_max=ctx.row_max,
         )
         return dq.to(ctx.input_dtype), dk.to(ctx.input_dtype), dv.to(ctx.input_dtype), None, None
 
