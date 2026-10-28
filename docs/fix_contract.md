@@ -27,3 +27,9 @@ The implementation is complete only when these invariants hold.
 The reference backend intentionally exposes these steps in Python. A native
 Blackwell implementation should preserve the same payload and scale metadata,
 then replace only the `fp4_matmul` primitive and tile loops.
+
+Projection modules follow the same type rules: forward inputs and weights are
+saved as NVFP4 payloads, dgrad uses a weight recast along the output axis, and
+wgrad uses an activation recast along the flattened batch axis. Their two
+backward products use independent stochastic streams; autograd never silently
+falls back to a decoded high precision weight for either product.

@@ -1,6 +1,6 @@
 import torch
 
-from croissattn import attention, quantize_nvfp4
+from croissattn import NVFP4Linear, attention, quantize_nvfp4
 
 
 def test_roundtrip_and_axis_recast():
@@ -41,3 +41,15 @@ def test_causal_output_changes_with_prefix_only():
     a = attention(q, k, v)
     b = attention(q2, k2, v2)
     assert torch.allclose(a[..., :5, :], b[..., :5, :], atol=1e-5, rtol=1e-5)
+
+
+def test_nvfp4_linear_uses_fp4_backward_path():
+    layer = NVFP4Linear(16, 12, bias=True)
+    x = torch.randn(2, 5, 16, requires_grad=True)
+    y = layer(x)
+    assert y.shape == (2, 5, 12)
+    y.square().mean().backward()
+    assert torch.isfinite(y).all()
+    assert torch.isfinite(x.grad).all()
+    assert torch.isfinite(layer.weight.grad).all()
+    assert torch.isfinite(layer.bias.grad).all()

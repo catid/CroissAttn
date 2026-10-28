@@ -35,9 +35,11 @@ out = attention(q, k, v, chunk_size=256)
 out.float().square().mean().backward()
 ```
 
-`NVFP4Linear` supplies a projection module with an identity STE for the master
-weights.  Replace the `torch.matmul` calls in `nvfp4.py` with the device's
-native NVFP4 GEMM to build a complete high-throughput trainer.
+`NVFP4Linear` supplies a projection module with saved forward payloads and
+explicit NVFP4 dgrad/wgrad products. Each backward operand is independently
+stochastically rounded and recast to its consumer contraction axis. Replace
+the `torch.matmul` calls in `nvfp4.py` with the device's native NVFP4 GEMM to
+build a complete high-throughput trainer.
 
 Run the checks with `pip install -e .` followed by `pytest -q`.  On the GB300
 reference container, the CUDA smoke test covers `B=1,H=2,S=16,D=16` and
