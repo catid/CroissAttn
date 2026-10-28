@@ -39,6 +39,27 @@ def _score_replay(qf: torch.Tensor, kf: torch.Tensor, scale: float) -> torch.Ten
     return torch.matmul(qf, kf.transpose(-2, -1)) * scale
 
 
+def _score_replay_tiled(
+    qf: torch.Tensor, kf: torch.Tensor, scale: float, tile: int
+) -> torch.Tensor:
+    """Replay scores with the same tile shape used by the backward pass."""
+
+    sq, sk = qf.shape[-2], kf.shape[-2]
+    scores = torch.empty(
+        (*qf.shape[:-2], sq, sk), dtype=torch.float32, device=qf.device
+    )
+    for q0 in range(0, sq, tile):
+        q1 = min(q0 + tile, sq)
+        for k0 in range(0, sk, tile):
+            k1 = min(k0 + tile, sk)
+            scores[..., q0:q1, k0:k1] = torch.matmul(
+                qf[..., q0:q1, :], kf[..., k0:k1, :].transpose(-2, -1)
+            ).float() * scale
+    rows = torch.arange(sq, device=qf.device)[:, None]
+    cols = torch.arange(sk, device=qf.device)[None, :]
+    return scores.masked_fill(cols > rows, float("-inf"))
+
+
 def _replay_probability_tile(
     qf: torch.Tensor,
     kf: torch.Tensor,
@@ -200,6 +221,8 @@ class _NVFP4AttentionFunction(Function):
             raise ValueError("the reference path currently requires self-attention")
         if q.device != k.device or q.device != v.device:
             raise ValueError("q, k and v must be on the same device")
+        if chunk_size is not None and int(chunk_size) <= 0:
+            raise ValueError("chunk_size must be positive or None")
 
         head_dim = q.shape[-1]
         attn_scale = float(scale) if scale is not None else head_dim**-0.5
@@ -210,11 +233,17 @@ class _NVFP4AttentionFunction(Function):
         kf = quantize_nvfp4(k, axis=-1, stochastic=False)
         vf = quantize_nvfp4(v, axis=-2, stochastic=False)
         q_dec, k_dec, v_dec = qf.decode(), kf.decode(), vf.decode()
-        scores = _score_replay(q_dec, k_dec, attn_scale).float()
-        scores = scores.masked_fill(
-            _causal_mask(scores.shape[-2], scores.shape[-1], scores.device),
-            float("-inf"),
-        )
+        # Keep score replay's contraction tile identical to backward whenever
+        # bounded execution is requested.  This preserves the saved-code
+        # reduction order across the forward/backward replay boundary.
+        if chunk_size:
+            scores = _score_replay_tiled(q_dec, k_dec, attn_scale, int(chunk_size))
+        else:
+            scores = _score_replay(q_dec, k_dec, attn_scale).float()
+            scores = scores.masked_fill(
+                _causal_mask(scores.shape[-2], scores.shape[-1], scores.device),
+                float("-inf"),
+            )
         p = torch.softmax(scores, dim=-1)
         row_max = scores.amax(dim=-1, keepdim=True)
         u = torch.exp(scores - row_max)
